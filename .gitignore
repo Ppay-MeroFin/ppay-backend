@@ -1,2 +1,8 @@
 *.exe
 .vscode/
+.env
+.env.*
+!.env.example
+tmp/
+dist/
+build/
