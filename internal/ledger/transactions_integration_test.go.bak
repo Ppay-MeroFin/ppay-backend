@@ -1,0 +1,38 @@
+package ledger
+
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// Account represents a user, merchant, or partner float
+type Account struct {
+	AccountID   uuid.UUID `json:"account_id"`
+	AccountType string    `json:"account_type"` // USER, MERCHANT, EMI_FLOAT, CLEARING
+	OwnerID     uuid.UUID `json:"owner_id"`
+	Currency    string    `json:"currency"` // SSP, USD
+}
+
+// JournalEntry is the immutable record of fund movement
+type JournalEntry struct {
+	EntryID       uuid.UUID `json:"entry_id"`
+	PpayRef       uuid.UUID `json:"ppay_ref"`
+	DebitAccount  uuid.UUID `json:"debit_account"`
+	CreditAccount uuid.UUID `json:"credit_account"`
+	Amount        float64   `json:"amount"`
+	Currency      string    `json:"currency"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+// TransactionRequest is the incoming payload from React Native
+type TransactionRequest struct {
+	ProductType    string    `json:"product_type"`
+	PhoneNumber    string    `json:"phone_number"`
+	Network        string    `json:"network"`
+	FromAccount    uuid.UUID `json:"from_account" binding:"required"`
+	ToAccount      uuid.UUID `json:"to_account" binding:"required"`
+	Amount         float64   `json:"amount" binding:"required,gt=0"`
+	Currency       string    `json:"currency" binding:"required,oneof=SSP USD"`
+	IdempotencyKey string    `json:"idempotency_key" binding:"required"`
+}
