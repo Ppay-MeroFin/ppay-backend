@@ -2,6 +2,63 @@
 
 # Ppay USSD Backend Spec v0.1 – USSD‑First Architecture
 
+## USSD-First Principle and M-Pesa Lessons
+
+Ppay follows a USSD-first strategy inspired by the success of M-Pesa, where USSD was a critical enabler that made the service accessible to almost everyone in Kenya.
+
+M-Pesa’s success came from several factors working together:
+
+- USSD worked on every phone; in 2007 most users had feature phones, not smartphones.
+- A massive agent network made cash-in and cash-out easy.
+- A trusted operator (Safaricom) with nationwide reach.
+- Simple, stable menus that users could quickly memorise.
+- A real problem to solve: safe remittances over long distances instead of carrying cash.
+
+Ppay’s situation is different but similar in spirit:
+
+- USSD must work on any phone, without data, across MTN, Zain, and Digitel.
+- Ppay is a neutral payments platform, not tied to a single operator.
+- Ppay Core Platform connects:
+  
+  - Ppay USSD (primary channel)
+  - Ppay mobile app (secondary convenience channel)
+  - Future web/agent channels (secondary)
+
+Strategic principle:
+
+> **If it cannot be completed on a feature phone, it is not yet a core Ppay service.**
+
+Core Ppay services must be available via USSD first:
+
+- Registration
+- PIN management
+- Balance
+- Airtime
+- Data bundles
+- Send money
+- Merchant payments
+- Government payments
+- Utility payments
+
+The mobile app provides a richer experience on top of the same backend:
+
+- QR payments
+- Transaction history
+- Spending insights
+- Biometric login
+- Digital receipts
+- Business dashboards
+
+Ppay’s main competitive advantage is to build the **best USSD experience in South Sudan**, not just a nice mobile app:
+
+- Works on any phone.
+- Works without data.
+- Works on MTN, Zain, and Digitel.
+- Simple menus.
+- Completes core flows in under 30 seconds.
+
+Unlike M-Pesa’s single-operator wallet, Ppay is designed as a **national payments layer** that can work across multiple mobile operators, banks, and eventually SSIPSS. This neutrality means customers should not have to care which operator or bank they use—they simply use Ppay.
+
 ## Purpose
 
 Ppay is a **USSD‑first digital payments platform** with a shared transaction engine and multiple access channels.
