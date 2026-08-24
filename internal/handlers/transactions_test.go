@@ -288,7 +288,7 @@ func TestAirtimeHandler_InvalidAmount(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/tx/airtime",
-		strings.NewReader(`{"amount_minor":0,"currency":"SSP","phone_number":"+211912345678","network":"MTN"}`),
+		strings.NewReader(`{"amount_minor":0,"currency":"SSP","phone_number":"+211921234567","network":"MTN"}`),
 	)
 	req.Header.Set("X-Idempotency-Key", "test-key")
 	w := httptest.NewRecorder()
@@ -319,7 +319,7 @@ func TestAirtimeHandler_InvalidCurrency(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/tx/airtime",
-		strings.NewReader(`{"amount_minor":100,"currency":"KES","phone_number":"+211912345678","network":"MTN"}`),
+		strings.NewReader(`{"amount_minor":100,"currency":"KES","phone_number":"+211921234567","network":"MTN"}`),
 	)
 	req.Header.Set("X-Idempotency-Key", "test-key")
 	w := httptest.NewRecorder()
@@ -356,7 +356,7 @@ func TestAirtimeHandler_IdempotencyConflict(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/tx/airtime",
-		strings.NewReader(`{"amount_minor":100,"currency":"SSP","phone_number":"+211912345678","network":"MTN"}`),
+		strings.NewReader(`{"amount_minor":100,"currency":"SSP","phone_number":"+211921234567","network":"MTN"}`),
 	)
 	req.Header.Set("X-Idempotency-Key", "conflict-key")
 	w := httptest.NewRecorder()
@@ -393,7 +393,7 @@ func TestAirtimeHandler_CreateFailure(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/tx/airtime",
-		strings.NewReader(`{"amount_minor":100,"currency":"SSP","phone_number":"+211912345678","network":"MTN"}`),
+		strings.NewReader(`{"amount_minor":100,"currency":"SSP","phone_number":"+211921234567","network":"MTN"}`),
 	)
 	req.Header.Set("X-Idempotency-Key", "fail-key")
 	w := httptest.NewRecorder()
@@ -438,7 +438,7 @@ func TestAirtimeHandler_Success(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/tx/airtime",
-		strings.NewReader(`{"amount_minor":100,"currency":"SSP","phone_number":"+211912345678","network":"MTN"}`),
+		strings.NewReader(`{"amount_minor":100,"currency":"SSP","phone_number":"+211921234567","network":"MTN"}`),
 	)
 	req.Header.Set("X-Idempotency-Key", "ok-key")
 	w := httptest.NewRecorder()

@@ -15,6 +15,72 @@ import (
 	"github.com/mading-alier/ppay-backend/internal/store"
 )
 
+func normalizeSouthSudanMobile(input string) string {
+	number := strings.NewReplacer(
+		" ", "",
+		"-", "",
+		"(", "",
+		")", "",
+	).Replace(strings.TrimSpace(input))
+
+	switch {
+	case strings.HasPrefix(number, "+211"):
+		return "0" + strings.TrimPrefix(number, "+211")
+	case strings.HasPrefix(number, "211"):
+		return "0" + strings.TrimPrefix(number, "211")
+	case strings.HasPrefix(number, "9"):
+		return "0" + number
+	default:
+		return number
+	}
+}
+
+func networkPhoneValidationError(
+	network string,
+	phoneNumber string,
+) *ErrorResponse {
+	normalizedNetwork := strings.ToUpper(strings.TrimSpace(network))
+	normalizedPhone := normalizeSouthSudanMobile(phoneNumber)
+
+	if len(normalizedPhone) != 10 || !strings.HasPrefix(normalizedPhone, "0") {
+		resp := newErrorResponse(
+			"invalid_phone_number",
+			"phone number must be a valid South Sudan mobile number",
+		)
+		return &resp
+	}
+
+	expectedPrefix := ""
+
+	switch normalizedNetwork {
+	case "ZAIN":
+		expectedPrefix = "091"
+	case "MTN":
+		expectedPrefix = "092"
+	case "DIGITEL":
+		expectedPrefix = "098"
+	default:
+		resp := newErrorResponse(
+			"unsupported_network",
+			"network must be ZAIN, MTN, or DIGITEL",
+		)
+		return &resp
+	}
+
+	if !strings.HasPrefix(normalizedPhone, expectedPrefix) {
+		resp := newErrorResponse(
+			"invalid_phone_network",
+			fmt.Sprintf(
+				"phone number does not match the selected %s network",
+				normalizedNetwork,
+			),
+		)
+		return &resp
+	}
+
+	return nil
+}
+
 func validateDataBundleRequest(
 	req ledger.DataBundleTransaction,
 ) *ErrorResponse {
@@ -114,13 +180,26 @@ func (h *Handler) AirtimeHandler(
 
 	req := ledger.TransactionRequest{
 		ProductType: body.ProductType,
-		PhoneNumber: body.PhoneNumber,
-		Network:     body.Network,
+		PhoneNumber: normalizeSouthSudanMobile(body.PhoneNumber),
+		Network:     strings.ToUpper(strings.TrimSpace(body.Network)),
 		AmountMinor: body.Amount,
 		Currency:    strings.ToUpper(strings.TrimSpace(body.Currency)),
 	}
 
 	if validationErr := validateAirtimeRequest(req); validationErr != nil {
+		writeJSONError(
+			w,
+			http.StatusBadRequest,
+			validationErr.Code,
+			validationErr.Message,
+		)
+		return
+	}
+
+	if validationErr := networkPhoneValidationError(
+		req.Network,
+		req.PhoneNumber,
+	); validationErr != nil {
 		writeJSONError(
 			w,
 			http.StatusBadRequest,
@@ -168,7 +247,7 @@ func (h *Handler) AirtimeHandler(
 		return
 	}
 
-	if h.MTNClient != nil {
+	if h.MTNClient != nil && req.Network == "MTN" {
 		_, err := h.MTNClient.RequestToPay(
 			r.Context(),
 			mtnmomo.RequestToPayRequest{
@@ -263,8 +342,8 @@ func (h *Handler) DataBundleHandler(
 
 	req := ledger.DataBundleTransaction{
 		ProductType:  ledger.ProductType(body.ProductType),
-		PhoneNumber:  body.PhoneNumber,
-		Network:      body.Network,
+		PhoneNumber:  normalizeSouthSudanMobile(body.PhoneNumber),
+		Network:      strings.ToUpper(strings.TrimSpace(body.Network)),
 		BundleCode:   body.BundleCode,
 		BundleName:   body.BundleName,
 		BundleSizeMB: body.BundleSize,
@@ -273,6 +352,19 @@ func (h *Handler) DataBundleHandler(
 	}
 
 	if validationErr := validateDataBundleRequest(req); validationErr != nil {
+		writeJSONError(
+			w,
+			http.StatusBadRequest,
+			validationErr.Code,
+			validationErr.Message,
+		)
+		return
+	}
+
+	if validationErr := networkPhoneValidationError(
+		req.Network,
+		req.PhoneNumber,
+	); validationErr != nil {
 		writeJSONError(
 			w,
 			http.StatusBadRequest,
