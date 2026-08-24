@@ -1,26 +1,12 @@
 package ledger
 
 func ToDataBundleTransaction(req TransactionRequest) (DataBundleTransaction, error) {
-	var bundleCode string
-	var bundleName string
-	var bundleSizeMB int64
-
-	if req.BundleCode != nil {
-		bundleCode = *req.BundleCode
-	}
-	if req.BundleName != nil {
-		bundleName = *req.BundleName
-	}
-	if req.BundleSizeMB != nil {
-		bundleSizeMB = *req.BundleSizeMB
-	}
-
 	return NewDataBundleTransaction(
 		req.PhoneNumber,
 		req.Network,
-		bundleCode,
-		bundleName,
-		bundleSizeMB,
+		stringValue(req.BundleCode),
+		stringValue(req.BundleName),
+		int64Value(req.BundleSizeMB),
 		req.AmountMinor,
 		req.Currency,
 		req.FromAccount,
@@ -45,4 +31,18 @@ func MapWorkflowToLedgerState(s WorkflowState) LedgerState {
 	default:
 		return LedgerUnknown
 	}
+}
+
+func stringValue(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
+}
+
+func int64Value(v *int64) int64 {
+	if v == nil {
+		return 0
+	}
+	return *v
 }

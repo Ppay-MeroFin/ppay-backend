@@ -9,12 +9,37 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mading-alier/ppay-backend/internal/config"
 	"github.com/mading-alier/ppay-backend/internal/handlers"
+	"github.com/mading-alier/ppay-backend/internal/mtnmomo"
 	"github.com/mading-alier/ppay-backend/internal/store"
+	"github.com/mading-alier/ppay-backend/internal/ussd"
 )
 
 func main() {
 	ctx := context.Background()
+
+	cfg := config.Load()
+
+	mtnClient := mtnmomo.NewCollectionClient(
+		cfg.MTNCollectionBaseURL,
+		cfg.MTNCollectionSubscriptionKey,
+		cfg.MTNCollectionAPIUser,
+		cfg.MTNCollectionAPIKey,
+		cfg.MTNCollectionTargetEnv,
+	)
+	mtnClient.SetCallbackURL(cfg.MTNCollectionCallbackURL)
+
+	token, err := mtnClient.GetAccessToken(ctx)
+	if err != nil {
+		log.Printf("mtn token error on startup (continuing, will retry on demand): %v", err)
+	} else {
+		prefix := token.AccessToken
+		if len(prefix) > 16 {
+			prefix = prefix[:16]
+		}
+		log.Printf("mtn collection token acquired, prefix=%s", prefix)
+	}
 
 	st, err := store.NewStore(ctx)
 	if err != nil {
@@ -22,15 +47,27 @@ func main() {
 	}
 	defer st.Close()
 
-	h := handlers.NewHandler(st)
+	h := handlers.NewHandler(st, mtnClient)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", h.HealthHandler)
-	mux.HandleFunc("/tx/airtime", h.AirtimeHandler)
-	mux.HandleFunc("/tx/data-bundle", h.DataBundleHandler)
-	mux.HandleFunc("/tx/status", h.TxStatusHandler)
-	mux.HandleFunc("/tx/events", h.TxEventsHandler)
-	mux.HandleFunc("/tx/reconcile", h.TxReconcileHandler)
+
+	mux.HandleFunc("GET /health", h.HealthHandler)
+	mux.HandleFunc("POST /tx/airtime", h.AirtimeHandler)
+	mux.HandleFunc("POST /tx/data-bundle", h.DataBundleHandler)
+	mux.HandleFunc("GET /tx/status/{ref}", h.TxStatusHandler)
+	mux.HandleFunc("GET /tx/events/{ref}", h.TxEventsHandler)
+	mux.HandleFunc("POST /tx/reconcile/{ref}", h.TxReconcileHandler)
+
+	mux.HandleFunc("POST /callbacks/mtn/collection", h.MTNCollectionCallbackHandler)
+	mux.HandleFunc("PUT /callbacks/mtn/collection", h.MTNCollectionCallbackHandler)
+
+	ussdStore := ussd.NewInMemorySessionStore()
+	ussdMenus := ussd.NewStaticMenuEngine()
+	ussdService := ussd.NewService(ussdMenus)
+	ussdEngine := ussd.NewSessionEngine(ussdStore, ussdMenus, ussdService)
+	ussdHandler := ussd.NewHandler(ussdStore, ussdEngine)
+
+	mux.HandleFunc("POST /ussd", ussdHandler.USSDHandler)
 
 	srv := &http.Server{
 		Addr:              ":8080",

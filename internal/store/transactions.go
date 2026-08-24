@@ -9,10 +9,10 @@ import (
 	"log"
 	"time"
 
-	"github.com/mading-alier/ppay-backend/internal/ledger"
-
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/mading-alier/ppay-backend/internal/ledger"
 )
 
 var (
@@ -27,6 +27,18 @@ type CreateTxResult struct {
 	IdempotencyKey string
 	CreatedAt      time.Time
 	IsReplay       bool
+}
+
+type TransactionStatusResult struct {
+	PpayRef        string
+	Status         string
+	ReconStatus    string
+	ProviderTxRef  *string
+	ProviderStatus *string
+	CorrelationID  *string
+	IdempotencyKey string
+	CreatedAt      *time.Time
+	UpdatedAt      *time.Time
 }
 
 type ReconcileResult struct {
@@ -71,6 +83,25 @@ func hashAirtimeRequest(req ledger.TransactionRequest, idempotencyKey string) st
 	return fmt.Sprintf("%x", sum)
 }
 
+func hashDataBundleRequest(txData ledger.DataBundleTransaction, idempotencyKey string) string {
+	canonical := fmt.Sprintf(
+		"%s|%s|%s|%s|%s|%s|%s|%d|%s|%s",
+		txData.ProductType,
+		txData.PhoneNumber,
+		txData.Network,
+		txData.BundleCode,
+		txData.BundleName,
+		txData.FromAccount.String(),
+		txData.ToAccount.String(),
+		txData.AmountMinor,
+		txData.Currency,
+		idempotencyKey,
+	)
+
+	sum := sha256.Sum256([]byte(canonical))
+	return fmt.Sprintf("%x", sum)
+}
+
 func canTransition(from, to string) bool {
 	switch from {
 	case "INITIATED":
@@ -99,10 +130,10 @@ func (s *Store) CreateAirtimeTx(ctx context.Context, req ledger.TransactionReque
 	var existingRequestHash string
 
 	err = tx.QueryRow(ctx, `
-        SELECT ppay_ref, state, created_at, request_hash
-        FROM settlement_ledger
-        WHERE idempotency_key = $1
-    `, idempotencyKey).Scan(&existingRef, &existingState, &existingCreatedAt, &existingRequestHash)
+		SELECT ppay_ref, state, created_at, request_hash
+		FROM settlement_ledger
+		WHERE idempotency_key = $1
+	`, idempotencyKey).Scan(&existingRef, &existingState, &existingCreatedAt, &existingRequestHash)
 
 	if err == nil {
 		if existingRequestHash == "" || existingRequestHash != requestHash {
@@ -117,7 +148,12 @@ func (s *Store) CreateAirtimeTx(ctx context.Context, req ledger.TransactionReque
 			return nil, ErrIdempotencyConflict
 		}
 
-		log.Printf("airtime tx replay idempotency_key=%s ppay_ref=%s correlation_id=%s", idempotencyKey, existingRef.String(), correlationID)
+		log.Printf(
+			"airtime tx replay idempotency_key=%s ppay_ref=%s correlation_id=%s",
+			idempotencyKey,
+			existingRef.String(),
+			correlationID,
+		)
 
 		if err := tx.Commit(ctx); err != nil {
 			return nil, err
@@ -140,12 +176,12 @@ func (s *Store) CreateAirtimeTx(ctx context.Context, req ledger.TransactionReque
 	now := time.Now().UTC()
 
 	_, err = tx.Exec(ctx, `
-        INSERT INTO settlement_ledger (
-            ppay_ref, idempotency_key, request_hash, state, recon_status,
-            from_account, to_account, amount, currency,
-            created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
-    `,
+		INSERT INTO settlement_ledger (
+			ppay_ref, idempotency_key, request_hash, state, recon_status,
+			from_account, to_account, amount, currency,
+			created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
+	`,
 		ppayRef,
 		idempotencyKey,
 		requestHash,
@@ -176,10 +212,10 @@ func (s *Store) CreateAirtimeTx(ctx context.Context, req ledger.TransactionReque
 	}
 
 	_, err = tx.Exec(ctx, `
-        INSERT INTO transaction_events (
-            ppay_ref, workflow_state, event_source, correlation_id, event_payload, created_at
-        ) VALUES ($1, $2, $3, $4, $5, $6)
-    `,
+		INSERT INTO transaction_events (
+			ppay_ref, workflow_state, event_source, correlation_id, event_payload, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6)
+	`,
 		ppayRef,
 		string(ledger.WorkflowInitiated),
 		"api",
@@ -208,10 +244,10 @@ func (s *Store) CreateAirtimeTx(ctx context.Context, req ledger.TransactionReque
 	}
 
 	_, err = tx.Exec(ctx, `
-        INSERT INTO outbox_events (
-            ppay_ref, topic, payload, state, attempt_count, created_at
-        ) VALUES ($1, $2, $3, $4, $5, $6)
-    `,
+		INSERT INTO outbox_events (
+			ppay_ref, topic, payload, state, attempt_count, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6)
+	`,
 		ppayRef,
 		"tx.airtime.initiated",
 		outboxPayload,
@@ -227,7 +263,12 @@ func (s *Store) CreateAirtimeTx(ctx context.Context, req ledger.TransactionReque
 		return nil, err
 	}
 
-	log.Printf("airtime tx created idempotency_key=%s ppay_ref=%s correlation_id=%s", idempotencyKey, ppayRef.String(), correlationID)
+	log.Printf(
+		"airtime tx created idempotency_key=%s ppay_ref=%s correlation_id=%s",
+		idempotencyKey,
+		ppayRef.String(),
+		correlationID,
+	)
 
 	return &CreateTxResult{
 		PpayRef:        ppayRef,
@@ -238,178 +279,7 @@ func (s *Store) CreateAirtimeTx(ctx context.Context, req ledger.TransactionReque
 	}, nil
 }
 
-func (s *Store) ReconcileTransaction(ctx context.Context, ppayRef string, targetStatus string, reason string, correlationID string) (*ReconcileResult, error) {
-	tx, err := s.Pool.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback(ctx)
-
-	var currentStatus string
-	var currentVersion int
-
-	err = tx.QueryRow(ctx, `
-        SELECT state, version
-        FROM settlement_ledger
-        WHERE ppay_ref::text = $1
-        FOR UPDATE
-    `, ppayRef).Scan(&currentStatus, &currentVersion)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrTransactionNotFound
-		}
-		return nil, err
-	}
-
-	if !canTransition(currentStatus, targetStatus) {
-		return nil, ErrReconcileNotAllowed
-	}
-
-	now := time.Now().UTC()
-	reconStatus := "RECONCILED"
-
-	tag, err := tx.Exec(ctx, `
-        UPDATE settlement_ledger
-        SET state = $2,
-            recon_status = $3,
-            version = version + 1,
-            updated_at = $4
-        WHERE ppay_ref::text = $1
-          AND version = $5
-    `, ppayRef, targetStatus, reconStatus, now, currentVersion)
-	if err != nil {
-		return nil, err
-	}
-	if tag.RowsAffected() == 0 {
-		return nil, ErrReconcileNotAllowed
-	}
-
-	eventPayload, err := json.Marshal(map[string]any{
-		"ppay_ref":        ppayRef,
-		"previous_status": currentStatus,
-		"target_status":   targetStatus,
-		"reason":          reason,
-		"source":          "manual-reconcile",
-		"reconciled_at":   now,
-		"reconciliation":  true,
-		"correlation_id":  correlationID,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	_, err = tx.Exec(ctx, `
-        INSERT INTO transaction_events (
-            ppay_ref, workflow_state, event_source, correlation_id, event_payload, created_at
-        ) VALUES ($1::uuid, $2, $3, $4, $5, $6)
-    `, ppayRef, targetStatus, "manual-reconcile", correlationID, eventPayload, now)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
-	}
-
-	return &ReconcileResult{
-		PpayRef:        ppayRef,
-		PreviousStatus: currentStatus,
-		Status:         targetStatus,
-		ReconStatus:    reconStatus,
-		Reason:         reason,
-		Timestamp:      now,
-	}, nil
-}
-
-func (s *Store) ListTransactionEvents(ctx context.Context, ppayRef string) (*ListEventsResult, error) {
-	var exists bool
-
-	err := s.Pool.QueryRow(ctx, `
-        SELECT EXISTS(
-            SELECT 1
-            FROM settlement_ledger
-            WHERE ppay_ref::text = $1
-        )
-    `, ppayRef).Scan(&exists)
-	if err != nil {
-		return nil, err
-	}
-
-	if !exists {
-		return nil, ErrTransactionNotFound
-	}
-
-	rows, err := s.Pool.Query(ctx, `
-        SELECT
-            event_id::text,
-            ppay_ref::text,
-            workflow_state,
-            event_source,
-            reason_code,
-            correlation_id,
-            event_payload,
-            created_at
-        FROM transaction_events
-        WHERE ppay_ref::text = $1
-        ORDER BY created_at ASC, event_id ASC
-    `, ppayRef)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	events := make([]TransactionEvent, 0)
-	for rows.Next() {
-		var ev TransactionEvent
-		if err := rows.Scan(
-			&ev.EventID,
-			&ev.PpayRef,
-			&ev.WorkflowState,
-			&ev.EventSource,
-			&ev.ReasonCode,
-			&ev.CorrelationID,
-			&ev.EventPayload,
-			&ev.CreatedAt,
-		); err != nil {
-			return nil, err
-		}
-		events = append(events, ev)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	return &ListEventsResult{
-		PpayRef: ppayRef,
-		Events:  events,
-	}, nil
-}
-
-func hashDataBundleRequest(txData ledger.DataBundleTransaction, idempotencyKey string) string {
-	canonical := fmt.Sprintf(
-		"%s|%s|%s|%s|%s|%s|%s|%d|%s|%s",
-		txData.ProductType,
-		txData.PhoneNumber,
-		txData.Network,
-		txData.BundleCode,
-		txData.BundleName,
-		txData.FromAccount.String(),
-		txData.ToAccount.String(),
-		txData.AmountMinor,
-		txData.Currency,
-		idempotencyKey,
-	)
-
-	sum := sha256.Sum256([]byte(canonical))
-	return fmt.Sprintf("%x", sum)
-}
-
-func (s *Store) CreateDataBundleTx(
-	ctx context.Context,
-	txData ledger.DataBundleTransaction,
-	idempotencyKey, correlationID string,
-) (*CreateTxResult, error) {
+func (s *Store) CreateDataBundleTx(ctx context.Context, txData ledger.DataBundleTransaction, idempotencyKey, correlationID string) (*CreateTxResult, error) {
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -424,10 +294,10 @@ func (s *Store) CreateDataBundleTx(
 	var existingRequestHash string
 
 	err = tx.QueryRow(ctx, `
-        SELECT ppay_ref, state, created_at, request_hash
-        FROM settlement_ledger
-        WHERE idempotency_key = $1
-    `, idempotencyKey).Scan(&existingRef, &existingState, &existingCreatedAt, &existingRequestHash)
+		SELECT ppay_ref, state, created_at, request_hash
+		FROM settlement_ledger
+		WHERE idempotency_key = $1
+	`, idempotencyKey).Scan(&existingRef, &existingState, &existingCreatedAt, &existingRequestHash)
 
 	if err == nil {
 		if existingRequestHash == "" || existingRequestHash != requestHash {
@@ -470,12 +340,12 @@ func (s *Store) CreateDataBundleTx(
 	now := time.Now().UTC()
 
 	_, err = tx.Exec(ctx, `
-        INSERT INTO settlement_ledger (
-            ppay_ref, idempotency_key, request_hash, state, recon_status,
-            from_account, to_account, amount, currency,
-            created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
-    `,
+		INSERT INTO settlement_ledger (
+			ppay_ref, idempotency_key, request_hash, state, recon_status,
+			from_account, to_account, amount, currency,
+			created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
+	`,
 		ppayRef,
 		idempotencyKey,
 		requestHash,
@@ -509,10 +379,10 @@ func (s *Store) CreateDataBundleTx(
 	}
 
 	_, err = tx.Exec(ctx, `
-        INSERT INTO transaction_events (
-            ppay_ref, workflow_state, event_source, correlation_id, event_payload, created_at
-        ) VALUES ($1, $2, $3, $4, $5, $6)
-    `,
+		INSERT INTO transaction_events (
+			ppay_ref, workflow_state, event_source, correlation_id, event_payload, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6)
+	`,
 		ppayRef,
 		string(ledger.WorkflowInitiated),
 		"api",
@@ -544,10 +414,10 @@ func (s *Store) CreateDataBundleTx(
 	}
 
 	_, err = tx.Exec(ctx, `
-        INSERT INTO outbox_events (
-            ppay_ref, topic, payload, state, attempt_count, created_at
-        ) VALUES ($1, $2, $3, $4, $5, $6)
-    `,
+		INSERT INTO outbox_events (
+			ppay_ref, topic, payload, state, attempt_count, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6)
+	`,
 		ppayRef,
 		"tx.data-bundle.initiated",
 		outboxPayload,
@@ -576,5 +446,189 @@ func (s *Store) CreateDataBundleTx(
 		IdempotencyKey: idempotencyKey,
 		CreatedAt:      now,
 		IsReplay:       false,
+	}, nil
+}
+
+func (s *Store) GetTransactionStatus(ctx context.Context, ppayRef string) (*TransactionStatusResult, error) {
+	var result TransactionStatusResult
+
+	err := s.Pool.QueryRow(ctx, `
+		SELECT
+			ppay_ref::text,
+			state,
+			recon_status,
+			provider_tx_ref,
+			provider_status,
+			correlation_id,
+			idempotency_key,
+			created_at,
+			updated_at
+		FROM settlement_ledger
+		WHERE ppay_ref::text = $1
+	`, ppayRef).Scan(
+		&result.PpayRef,
+		&result.Status,
+		&result.ReconStatus,
+		&result.ProviderTxRef,
+		&result.ProviderStatus,
+		&result.CorrelationID,
+		&result.IdempotencyKey,
+		&result.CreatedAt,
+		&result.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrTransactionNotFound
+		}
+		return nil, err
+	}
+
+	return &result, nil
+}
+
+func (s *Store) ReconcileTransaction(ctx context.Context, ppayRef string, targetStatus string, reason string, correlationID string) (*ReconcileResult, error) {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	var currentStatus string
+	var currentVersion int
+
+	err = tx.QueryRow(ctx, `
+		SELECT state, version
+		FROM settlement_ledger
+		WHERE ppay_ref::text = $1
+		FOR UPDATE
+	`, ppayRef).Scan(&currentStatus, &currentVersion)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrTransactionNotFound
+		}
+		return nil, err
+	}
+
+	if !canTransition(currentStatus, targetStatus) {
+		return nil, ErrReconcileNotAllowed
+	}
+
+	now := time.Now().UTC()
+	reconStatus := "RECONCILED"
+
+	tag, err := tx.Exec(ctx, `
+		UPDATE settlement_ledger
+		SET state = $2,
+			recon_status = $3,
+			version = version + 1,
+			updated_at = $4
+		WHERE ppay_ref::text = $1
+		  AND version = $5
+	`, ppayRef, targetStatus, reconStatus, now, currentVersion)
+	if err != nil {
+		return nil, err
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, ErrReconcileNotAllowed
+	}
+
+	eventPayload, err := json.Marshal(map[string]any{
+		"ppay_ref":        ppayRef,
+		"previous_status": currentStatus,
+		"target_status":   targetStatus,
+		"reason":          reason,
+		"source":          "manual-reconcile",
+		"reconciled_at":   now,
+		"reconciliation":  true,
+		"correlation_id":  correlationID,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO transaction_events (
+			ppay_ref, workflow_state, event_source, correlation_id, event_payload, created_at
+		) VALUES ($1::uuid, $2, $3, $4, $5, $6)
+	`, ppayRef, targetStatus, "manual-reconcile", correlationID, eventPayload, now)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+
+	return &ReconcileResult{
+		PpayRef:        ppayRef,
+		PreviousStatus: currentStatus,
+		Status:         targetStatus,
+		ReconStatus:    reconStatus,
+		Reason:         reason,
+		Timestamp:      now,
+	}, nil
+}
+
+func (s *Store) ListTransactionEvents(ctx context.Context, ppayRef string) (*ListEventsResult, error) {
+	var exists bool
+
+	err := s.Pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1
+			FROM settlement_ledger
+			WHERE ppay_ref::text = $1
+		)
+	`, ppayRef).Scan(&exists)
+	if err != nil {
+		return nil, err
+	}
+
+	if !exists {
+		return nil, ErrTransactionNotFound
+	}
+
+	rows, err := s.Pool.Query(ctx, `
+		SELECT
+			id::text,
+			ppay_ref::text,
+			workflow_state,
+			event_source,
+			correlation_id,
+			event_payload,
+			created_at
+		FROM transaction_events
+		WHERE ppay_ref::text = $1
+		ORDER BY created_at ASC, id ASC
+	`, ppayRef)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	events := make([]TransactionEvent, 0)
+	for rows.Next() {
+		var ev TransactionEvent
+		if err := rows.Scan(
+			&ev.EventID,
+			&ev.PpayRef,
+			&ev.WorkflowState,
+			&ev.EventSource,
+			&ev.CorrelationID,
+			&ev.EventPayload,
+			&ev.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		ev.ReasonCode = nil
+		events = append(events, ev)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return &ListEventsResult{
+		PpayRef: ppayRef,
+		Events:  events,
 	}, nil
 }

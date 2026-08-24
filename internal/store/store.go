@@ -17,7 +17,7 @@ type Store struct {
 
 func NewStore(ctx context.Context) (*Store, error) {
 	host := getenv("DBHOST", "localhost")
-	port := getenv("DBPORT", "5432")
+	port := getenv("DBPORT", "5433")
 	user := getenv("DBUSER", "postgres")
 	password := os.Getenv("DBPASSWORD")
 	dbName := getenv("DBNAME", "ppay")

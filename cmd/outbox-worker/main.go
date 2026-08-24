@@ -11,7 +11,37 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
 	"github.com/mading-alier/ppay-backend/internal/store"
+)
+
+const (
+	topicAirtimeInitiated    = "tx.airtime.initiated"
+	topicDataBundleInitiated = "tx.data-bundle.initiated"
+
+	outboxStatePending    = "PENDING"
+	outboxStateProcessing = "PROCESSING"
+	outboxStateSent       = "SENT"
+	outboxStateFailed     = "FAILED"
+
+	ledgerStateInitiated = "INITIATED"
+	ledgerStatePending   = "PENDING"
+	ledgerStateSettled   = "SETTLED"
+	ledgerStateFailed    = "FAILED"
+	ledgerStateUnknown   = "UNKNOWN"
+
+	workflowStateRetryScheduled = "RETRY_SCHEDULED"
+	workflowStateFailed         = "FAILED"
+	workflowStateUnknown        = "UNKNOWN"
+
+	reasonCodeProviderRetry   = "PROVIDER_RETRY"
+	reasonCodeProviderDecline = "PROVIDER_DECLINE"
+	reasonCodeProviderTimeout = "PROVIDER_TIMEOUT"
+
+	providerSource = "provider-simulator"
+	workerSource   = "outbox-worker"
+
+	batchSize = 10
 )
 
 type OutboxEvent struct {
@@ -30,7 +60,7 @@ type AirtimePayload struct {
 	ProductType    string `json:"product_type"`
 	PhoneNumber    string `json:"phone_number"`
 	Network        string `json:"network"`
-	Amount         int64  `json:"amount_minor"`
+	AmountMinor    int64  `json:"amount_minor"`
 	Currency       string `json:"currency"`
 	FromAccount    string `json:"from_account"`
 	ToAccount      string `json:"to_account"`
@@ -45,7 +75,7 @@ type DataBundlePayload struct {
 	BundleCode     string `json:"bundle_code"`
 	BundleName     string `json:"bundle_name,omitempty"`
 	BundleSizeMB   int64  `json:"bundle_size_mb,omitempty"`
-	Amount         int64  `json:"amount_minor"`
+	AmountMinor    int64  `json:"amount_minor"`
 	Currency       string `json:"currency"`
 	FromAccount    string `json:"from_account"`
 	ToAccount      string `json:"to_account"`
@@ -59,11 +89,11 @@ func main() {
 
 	st, err := store.NewStore(ctx)
 	if err != nil {
-		log.Fatalf("outbox-worker: db init failed: %v", err)
+		log.Fatalf("%s: db init failed: %v", workerSource, err)
 	}
 	defer st.Close()
 
-	log.Println("outbox-worker: started")
+	log.Printf("%s: started", workerSource)
 
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
@@ -71,34 +101,78 @@ func main() {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("outbox-worker: shutting down")
+			log.Printf("%s: shutting down", workerSource)
 			return
 		case <-ticker.C:
 			if err := processBatch(ctx, st); err != nil {
-				log.Printf("outbox-worker: processBatch error: %v", err)
+				log.Printf("%s: processBatch error: %v", workerSource, err)
 			}
 		}
 	}
 }
 
 func processBatch(ctx context.Context, st *store.Store) error {
-	tx, err := st.Pool.Begin(ctx)
+	events, err := claimReadyEvents(ctx, st, batchSize)
 	if err != nil {
 		return err
+	}
+
+	if len(events) == 0 {
+		return nil
+	}
+
+	log.Printf("%s: claimed %d ready events", workerSource, len(events))
+
+	for _, ev := range events {
+		if err := processEvent(ctx, st, ev); err != nil {
+			log.Printf(
+				"%s: processEvent failed ppay_ref=%s topic=%s err=%v",
+				workerSource,
+				ev.PpayRef.String(),
+				ev.Topic,
+				err,
+			)
+		}
+	}
+
+	return nil
+}
+
+func claimReadyEvents(ctx context.Context, st *store.Store, limit int) ([]OutboxEvent, error) {
+	tx, err := st.Pool.Begin(ctx)
+	if err != nil {
+		return nil, err
 	}
 	defer tx.Rollback(ctx)
 
 	rows, err := tx.Query(ctx, `
-        SELECT ppay_ref, topic, payload, state, attempt_count, max_retries, created_at, next_retry_at, last_error
-        FROM outbox_events
-        WHERE state = 'PENDING'
-          AND next_retry_at <= NOW()
-        ORDER BY created_at
-        FOR UPDATE SKIP LOCKED
-        LIMIT 10
-    `)
+		WITH ready AS (
+			SELECT ppay_ref
+			FROM outbox_events
+			WHERE state = 'PENDING'
+			  AND next_retry_at <= NOW()
+			ORDER BY created_at
+			FOR UPDATE SKIP LOCKED
+			LIMIT $1
+		)
+		UPDATE outbox_events oe
+		SET state = 'PROCESSING',
+		    processed_at = NOW()
+		FROM ready
+		WHERE oe.ppay_ref = ready.ppay_ref
+		RETURNING
+			oe.ppay_ref,
+			oe.topic,
+			oe.payload,
+			oe.state,
+			oe.attempt_count,
+			oe.max_retries,
+			oe.created_at,
+			oe.next_retry_at,
+			oe.last_error
+	`, limit)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer rows.Close()
 
@@ -117,39 +191,27 @@ func processBatch(ctx context.Context, st *store.Store) error {
 			&ev.NextRetryAt,
 			&ev.LastError,
 		); err != nil {
-			return err
+			return nil, err
 		}
 		events = append(events, ev)
 	}
 
 	if err := rows.Err(); err != nil {
-		return err
+		return nil, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return err
+		return nil, err
 	}
 
-	if len(events) == 0 {
-		return nil
-	}
-
-	log.Printf("outbox-worker: found %d ready events", len(events))
-
-	for _, ev := range events {
-		if err := processEvent(ctx, st, ev); err != nil {
-			log.Printf("outbox-worker: processEvent failed ppay_ref=%s topic=%s err=%v", ev.PpayRef.String(), ev.Topic, err)
-		}
-	}
-
-	return nil
+	return events, nil
 }
 
 func processEvent(ctx context.Context, st *store.Store, ev OutboxEvent) error {
 	switch ev.Topic {
-	case "tx.airtime.initiated":
+	case topicAirtimeInitiated:
 		return processAirtimeEvent(ctx, st, ev)
-	case "tx.data-bundle.initiated":
+	case topicDataBundleInitiated:
 		return processDataBundleEvent(ctx, st, ev)
 	default:
 		return markFailedAttemptGeneric(ctx, st, ev, "", fmt.Errorf("unsupported topic: %s", ev.Topic), false)
@@ -166,17 +228,20 @@ func processAirtimeEvent(ctx context.Context, st *store.Store, ev OutboxEvent) e
 		payload.CorrelationID = uuid.NewString()
 	}
 
-	masked := maskPhone(payload.PhoneNumber)
+	maskedPhone := maskPhone(payload.PhoneNumber)
 
 	log.Printf(
-		"outbox-worker: dispatch airtime ppay_ref=%s topic=%s attempt=%d/%d correlation_id=%s phone_number=%s payload=%s",
+		"%s: dispatch airtime ppay_ref=%s topic=%s attempt=%d/%d correlation_id=%s phone_number=%s network=%s amount_minor=%d currency=%s",
+		workerSource,
 		ev.PpayRef.String(),
 		ev.Topic,
 		ev.AttemptCount+1,
 		ev.MaxRetries,
 		payload.CorrelationID,
-		masked,
-		string(ev.Payload),
+		maskedPhone,
+		payload.Network,
+		payload.AmountMinor,
+		payload.Currency,
 	)
 
 	fail, decline := shouldSimulateFailure(payload.PhoneNumber, payload.IdempotencyKey)
@@ -186,7 +251,7 @@ func processAirtimeEvent(ctx context.Context, st *store.Store, ev OutboxEvent) e
 			st,
 			ev,
 			payload.CorrelationID,
-			fmt.Errorf("simulated provider failure for phone=%s", masked),
+			fmt.Errorf("simulated provider failure for phone=%s", maskedPhone),
 			decline,
 		)
 	}
@@ -200,10 +265,10 @@ func processAirtimeEvent(ctx context.Context, st *store.Store, ev OutboxEvent) e
 		"phone_number":    payload.PhoneNumber,
 		"network":         payload.Network,
 		"product_type":    payload.ProductType,
-		"amount":          payload.Amount,
+		"amount_minor":    payload.AmountMinor,
 		"currency":        payload.Currency,
 		"delivered_at":    time.Now().UTC(),
-		"source":          "provider-simulator",
+		"source":          providerSource,
 		"correlation_id":  payload.CorrelationID,
 	})
 	if err != nil {
@@ -213,8 +278,8 @@ func processAirtimeEvent(ctx context.Context, st *store.Store, ev OutboxEvent) e
 	settledPayload, err := json.Marshal(map[string]any{
 		"ppay_ref":              ev.PpayRef,
 		"topic":                 ev.Topic,
-		"status":                "SETTLED",
-		"source":                "provider-simulator",
+		"status":                ledgerStateSettled,
+		"source":                providerSource,
 		"provider_tx_ref":       providerTxRef,
 		"provider_status":       providerStatus,
 		"provider_response_ref": providerTxRef,
@@ -246,17 +311,21 @@ func processDataBundleEvent(ctx context.Context, st *store.Store, ev OutboxEvent
 		payload.CorrelationID = uuid.NewString()
 	}
 
-	masked := maskPhone(payload.PhoneNumber)
+	maskedPhone := maskPhone(payload.PhoneNumber)
 
 	log.Printf(
-		"outbox-worker: dispatch data-bundle ppay_ref=%s topic=%s attempt=%d/%d correlation_id=%s phone_number=%s payload=%s",
+		"%s: dispatch data-bundle ppay_ref=%s topic=%s attempt=%d/%d correlation_id=%s phone_number=%s network=%s bundle_code=%s amount_minor=%d currency=%s",
+		workerSource,
 		ev.PpayRef.String(),
 		ev.Topic,
 		ev.AttemptCount+1,
 		ev.MaxRetries,
 		payload.CorrelationID,
-		masked,
-		string(ev.Payload),
+		maskedPhone,
+		payload.Network,
+		payload.BundleCode,
+		payload.AmountMinor,
+		payload.Currency,
 	)
 
 	fail, decline := shouldSimulateFailure(payload.PhoneNumber, payload.IdempotencyKey)
@@ -266,7 +335,7 @@ func processDataBundleEvent(ctx context.Context, st *store.Store, ev OutboxEvent
 			st,
 			ev,
 			payload.CorrelationID,
-			fmt.Errorf("simulated provider failure for bundle=%s phone=%s", payload.BundleCode, masked),
+			fmt.Errorf("simulated provider failure for bundle=%s phone=%s", payload.BundleCode, maskedPhone),
 			decline,
 		)
 	}
@@ -285,10 +354,10 @@ func processDataBundleEvent(ctx context.Context, st *store.Store, ev OutboxEvent
 		"bundle_name":          payload.BundleName,
 		"bundle_size_mb":       payload.BundleSizeMB,
 		"product_type":         payload.ProductType,
-		"amount":               payload.Amount,
+		"amount_minor":         payload.AmountMinor,
 		"currency":             payload.Currency,
 		"delivered_at":         time.Now().UTC(),
-		"source":               "provider-simulator",
+		"source":               providerSource,
 		"correlation_id":       payload.CorrelationID,
 	})
 	if err != nil {
@@ -298,8 +367,8 @@ func processDataBundleEvent(ctx context.Context, st *store.Store, ev OutboxEvent
 	settledPayload, err := json.Marshal(map[string]any{
 		"ppay_ref":             ev.PpayRef,
 		"topic":                ev.Topic,
-		"status":               "SETTLED",
-		"source":               "provider-simulator",
+		"status":               ledgerStateSettled,
+		"source":               providerSource,
 		"provider_tx_ref":      providerTxRef,
 		"provider_status":      providerStatus,
 		"provider_bundle_code": providerBundleCode,
@@ -342,28 +411,28 @@ func completeSuccessfulEvent(
 	var currentVersion int
 
 	err = tx.QueryRow(ctx, `
-        SELECT state, version
-        FROM settlement_ledger
-        WHERE ppay_ref = $1
-        FOR UPDATE
-    `, ev.PpayRef).Scan(&currentState, &currentVersion)
+		SELECT state, version
+		FROM settlement_ledger
+		WHERE ppay_ref = $1
+		FOR UPDATE
+	`, ev.PpayRef).Scan(&currentState, &currentVersion)
 	if err != nil {
 		return err
 	}
 
-	if currentState != "INITIATED" {
-		return fmt.Errorf("invalid transition to PENDING from state=%s", currentState)
+	if currentState != ledgerStateInitiated {
+		return fmt.Errorf("invalid transition to %s from state=%s", ledgerStatePending, currentState)
 	}
 
 	tag, err := tx.Exec(ctx, `
-        UPDATE settlement_ledger
-        SET state = 'PENDING',
-            version = version + 1,
-            updated_at = NOW()
-        WHERE ppay_ref = $1
-          AND version = $2
-          AND state = 'INITIATED'
-    `, ev.PpayRef, currentVersion)
+		UPDATE settlement_ledger
+		SET state = 'PENDING',
+		    version = version + 1,
+		    updated_at = NOW()
+		WHERE ppay_ref = $1
+		  AND version = $2
+		  AND state = 'INITIATED'
+	`, ev.PpayRef, currentVersion)
 	if err != nil {
 		return err
 	}
@@ -374,8 +443,8 @@ func completeSuccessfulEvent(
 	pendingPayload, err := json.Marshal(map[string]any{
 		"ppay_ref":       ev.PpayRef,
 		"topic":          ev.Topic,
-		"status":         "PENDING",
-		"source":         "outbox-worker",
+		"status":         ledgerStatePending,
+		"source":         workerSource,
 		"correlation_id": correlationID,
 	})
 	if err != nil {
@@ -383,13 +452,13 @@ func completeSuccessfulEvent(
 	}
 
 	_, err = tx.Exec(ctx, `
-        INSERT INTO transaction_events (
-            ppay_ref, workflow_state, event_source, correlation_id, event_payload, created_at
-        ) VALUES ($1, $2, $3, $4, $5::jsonb, $6)
-    `,
+		INSERT INTO transaction_events (
+			ppay_ref, workflow_state, event_source, correlation_id, event_payload, created_at
+		) VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+	`,
 		ev.PpayRef,
-		"PENDING",
-		"outbox-worker",
+		ledgerStatePending,
+		workerSource,
 		correlationID,
 		string(pendingPayload),
 		time.Now().UTC(),
@@ -399,17 +468,17 @@ func completeSuccessfulEvent(
 	}
 
 	tag, err = tx.Exec(ctx, `
-        UPDATE settlement_ledger
-        SET state = 'SETTLED',
-            provider_tx_ref = $2,
-            provider_status = $3,
-            provider_response_payload = $4::jsonb,
-            version = version + 1,
-            updated_at = NOW()
-        WHERE ppay_ref = $1
-          AND version = $5
-          AND state = 'PENDING'
-    `, ev.PpayRef, providerTxRef, providerStatus, providerResponsePayload, currentVersion+1)
+		UPDATE settlement_ledger
+		SET state = 'SETTLED',
+		    provider_tx_ref = $2,
+		    provider_status = $3,
+		    provider_response_payload = $4::jsonb,
+		    version = version + 1,
+		    updated_at = NOW()
+		WHERE ppay_ref = $1
+		  AND version = $5
+		  AND state = 'PENDING'
+	`, ev.PpayRef, providerTxRef, providerStatus, providerResponsePayload, currentVersion+1)
 	if err != nil {
 		return err
 	}
@@ -418,13 +487,13 @@ func completeSuccessfulEvent(
 	}
 
 	_, err = tx.Exec(ctx, `
-        INSERT INTO transaction_events (
-            ppay_ref, workflow_state, event_source, correlation_id, event_payload, created_at
-        ) VALUES ($1, $2, $3, $4, $5::jsonb, $6)
-    `,
+		INSERT INTO transaction_events (
+			ppay_ref, workflow_state, event_source, correlation_id, event_payload, created_at
+		) VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+	`,
 		ev.PpayRef,
-		"SETTLED",
-		"provider-simulator",
+		ledgerStateSettled,
+		providerSource,
 		correlationID,
 		settledPayload,
 		time.Now().UTC(),
@@ -434,14 +503,13 @@ func completeSuccessfulEvent(
 	}
 
 	_, err = tx.Exec(ctx, `
-        UPDATE outbox_events
-        SET state = 'SENT',
-            attempt_count = attempt_count + 1,
-            processed_at = NOW(),
-            last_error = NULL
-        WHERE ppay_ref = $1
-          AND state = 'PENDING'
-    `, ev.PpayRef)
+		UPDATE outbox_events
+		SET state = 'SENT',
+		    attempt_count = attempt_count + 1,
+		    last_error = NULL
+		WHERE ppay_ref = $1
+		  AND state = 'PROCESSING'
+	`, ev.PpayRef)
 	if err != nil {
 		return err
 	}
@@ -451,23 +519,33 @@ func completeSuccessfulEvent(
 	}
 
 	log.Printf(
-		"outbox-worker: completed ppay_ref=%s topic=%s final_state=SETTLED provider_tx_ref=%s provider_status=%s correlation_id=%s",
+		"%s: completed ppay_ref=%s topic=%s final_state=%s provider_tx_ref=%s provider_status=%s correlation_id=%s",
+		workerSource,
 		ev.PpayRef.String(),
 		ev.Topic,
+		ledgerStateSettled,
 		providerTxRef,
 		providerStatus,
 		correlationID,
 	)
+
 	return nil
 }
 
-func markFailedAttemptGeneric(ctx context.Context, st *store.Store, ev OutboxEvent, correlationID string, cause error, isDecline bool) error {
+func markFailedAttemptGeneric(
+	ctx context.Context,
+	st *store.Store,
+	ev OutboxEvent,
+	correlationID string,
+	cause error,
+	isDecline bool,
+) error {
 	nextAttempt := ev.AttemptCount + 1
-	outboxState := "PENDING"
-	ledgerState := "INITIATED"
-	workflowState := "RETRY_SCHEDULED"
-	reasonCode := "PROVIDER_RETRY"
-	payloadStatus := "RETRY_SCHEDULED"
+	outboxState := outboxStatePending
+	ledgerState := ledgerStateInitiated
+	workflowState := workflowStateRetryScheduled
+	reasonCode := reasonCodeProviderRetry
+	payloadStatus := workflowStateRetryScheduled
 	nextRetry := time.Now().UTC().Add(backoffDuration(nextAttempt))
 
 	if correlationID == "" {
@@ -475,17 +553,17 @@ func markFailedAttemptGeneric(ctx context.Context, st *store.Store, ev OutboxEve
 	}
 
 	if nextAttempt >= ev.MaxRetries {
-		outboxState = "FAILED"
+		outboxState = outboxStateFailed
 		if isDecline {
-			ledgerState = "FAILED"
-			workflowState = "FAILED"
-			reasonCode = "PROVIDER_DECLINE"
-			payloadStatus = "FAILED"
+			ledgerState = ledgerStateFailed
+			workflowState = workflowStateFailed
+			reasonCode = reasonCodeProviderDecline
+			payloadStatus = ledgerStateFailed
 		} else {
-			ledgerState = "UNKNOWN"
-			workflowState = "UNKNOWN"
-			reasonCode = "PROVIDER_TIMEOUT"
-			payloadStatus = "UNKNOWN"
+			ledgerState = ledgerStateUnknown
+			workflowState = workflowStateUnknown
+			reasonCode = reasonCodeProviderTimeout
+			payloadStatus = ledgerStateUnknown
 		}
 	}
 
@@ -496,15 +574,15 @@ func markFailedAttemptGeneric(ctx context.Context, st *store.Store, ev OutboxEve
 	defer tx.Rollback(ctx)
 
 	_, err = tx.Exec(ctx, `
-        UPDATE outbox_events
-        SET attempt_count = $2,
-            last_error = $3,
-            next_retry_at = $4,
-            state = $5,
-            processed_at = CASE WHEN $5 = 'FAILED' THEN NOW() ELSE processed_at END
-        WHERE ppay_ref = $1
-          AND state = 'PENDING'
-    `, ev.PpayRef, nextAttempt, cause.Error(), nextRetry, outboxState)
+		UPDATE outbox_events
+		SET attempt_count = $2,
+		    last_error = $3,
+		    next_retry_at = $4,
+		    state = $5,
+		    processed_at = CASE WHEN $5 = 'FAILED' THEN NOW() ELSE processed_at END
+		WHERE ppay_ref = $1
+		  AND state = 'PROCESSING'
+	`, ev.PpayRef, nextAttempt, cause.Error(), nextRetry, outboxState)
 	if err != nil {
 		return err
 	}
@@ -513,24 +591,24 @@ func markFailedAttemptGeneric(ctx context.Context, st *store.Store, ev OutboxEve
 	var currentVersion int
 
 	err = tx.QueryRow(ctx, `
-        SELECT state, version
-        FROM settlement_ledger
-        WHERE ppay_ref = $1
-        FOR UPDATE
-    `, ev.PpayRef).Scan(&currentState, &currentVersion)
+		SELECT state, version
+		FROM settlement_ledger
+		WHERE ppay_ref = $1
+		FOR UPDATE
+	`, ev.PpayRef).Scan(&currentState, &currentVersion)
 	if err != nil {
 		return err
 	}
 
-	allowed := currentState == "INITIATED" || currentState == "PENDING"
-	if !allowed {
+	if currentState != ledgerStateInitiated && currentState != ledgerStatePending {
 		return fmt.Errorf("invalid failure transition from state=%s", currentState)
 	}
 
 	providerStatus := ""
-	if ledgerState == "FAILED" {
+	switch ledgerState {
+	case ledgerStateFailed:
 		providerStatus = "DECLINED"
-	} else if ledgerState == "UNKNOWN" {
+	case ledgerStateUnknown:
 		providerStatus = "TIMEOUT"
 	}
 
@@ -541,27 +619,27 @@ func markFailedAttemptGeneric(ctx context.Context, st *store.Store, ev OutboxEve
 		"attempt_count":  nextAttempt,
 		"max_retries":    ev.MaxRetries,
 		"next_retry_at":  nextRetry,
-		"source":         "outbox-worker",
+		"source":         workerSource,
 		"correlation_id": correlationID,
 	})
 
 	tag, err := tx.Exec(ctx, `
-        UPDATE settlement_ledger
-        SET state = $2::ledger_state,
-            provider_status = CASE
-                WHEN $3::text <> '' THEN $3::text
-                ELSE provider_status
-            END,
-            provider_response_payload = CASE
-                WHEN $4::text <> '' THEN $4::jsonb
-                ELSE provider_response_payload
-            END,
-            version = version + 1,
-            updated_at = NOW()
-        WHERE ppay_ref = $1
-          AND version = $5
-          AND state IN ('INITIATED', 'PENDING')
-    `, ev.PpayRef, ledgerState, providerStatus, providerPayload, currentVersion)
+		UPDATE settlement_ledger
+		SET state = $2::ledger_state,
+		    provider_status = CASE
+		        WHEN $3::text <> '' THEN $3::text
+		        ELSE provider_status
+		    END,
+		    provider_response_payload = CASE
+		        WHEN $4::text <> '' THEN $4::jsonb
+		        ELSE provider_response_payload
+		    END,
+		    version = version + 1,
+		    updated_at = NOW()
+		WHERE ppay_ref = $1
+		  AND version = $5
+		  AND state IN ('INITIATED', 'PENDING')
+	`, ev.PpayRef, ledgerState, providerStatus, providerPayload, currentVersion)
 	if err != nil {
 		return err
 	}
@@ -573,7 +651,7 @@ func markFailedAttemptGeneric(ctx context.Context, st *store.Store, ev OutboxEve
 		"ppay_ref":       ev.PpayRef,
 		"topic":          ev.Topic,
 		"status":         payloadStatus,
-		"source":         "outbox-worker",
+		"source":         workerSource,
 		"last_error":     cause.Error(),
 		"attempt_count":  nextAttempt,
 		"max_retries":    ev.MaxRetries,
@@ -586,10 +664,10 @@ func markFailedAttemptGeneric(ctx context.Context, st *store.Store, ev OutboxEve
 	}
 
 	_, err = tx.Exec(ctx, `
-        INSERT INTO transaction_events (
-            ppay_ref, workflow_state, event_source, reason_code, correlation_id, event_payload, created_at
-        ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
-    `, ev.PpayRef, workflowState, "outbox-worker", reasonCode, correlationID, string(failurePayload), time.Now().UTC())
+		INSERT INTO transaction_events (
+			ppay_ref, workflow_state, event_source, reason_code, correlation_id, event_payload, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+	`, ev.PpayRef, workflowState, workerSource, reasonCode, correlationID, string(failurePayload), time.Now().UTC())
 	if err != nil {
 		return err
 	}
@@ -598,12 +676,32 @@ func markFailedAttemptGeneric(ctx context.Context, st *store.Store, ev OutboxEve
 		return err
 	}
 
-	if outboxState == "FAILED" {
-		log.Printf("outbox-worker: terminal state ppay_ref=%s topic=%s attempts=%d ledger_state=%s reason_code=%s is_decline=%t correlation_id=%s err=%v",
-			ev.PpayRef.String(), ev.Topic, nextAttempt, ledgerState, reasonCode, isDecline, correlationID, cause)
+	if outboxState == outboxStateFailed {
+		log.Printf(
+			"%s: terminal state ppay_ref=%s topic=%s attempts=%d ledger_state=%s reason_code=%s is_decline=%t correlation_id=%s err=%v",
+			workerSource,
+			ev.PpayRef.String(),
+			ev.Topic,
+			nextAttempt,
+			ledgerState,
+			reasonCode,
+			isDecline,
+			correlationID,
+			cause,
+		)
 	} else {
-		log.Printf("outbox-worker: scheduled retry ppay_ref=%s topic=%s attempt=%d/%d next_retry_at=%s reason_code=%s correlation_id=%s err=%v",
-			ev.PpayRef.String(), ev.Topic, nextAttempt, ev.MaxRetries, nextRetry.Format(time.RFC3339), reasonCode, correlationID, cause)
+		log.Printf(
+			"%s: scheduled retry ppay_ref=%s topic=%s attempt=%d/%d next_retry_at=%s reason_code=%s correlation_id=%s err=%v",
+			workerSource,
+			ev.PpayRef.String(),
+			ev.Topic,
+			nextAttempt,
+			ev.MaxRetries,
+			nextRetry.Format(time.RFC3339),
+			reasonCode,
+			correlationID,
+			cause,
+		)
 	}
 
 	return nil
@@ -611,13 +709,13 @@ func markFailedAttemptGeneric(ctx context.Context, st *store.Store, ev OutboxEve
 
 func shouldSimulateFailure(phoneNumber, idempotencyKey string) (fail bool, decline bool) {
 	phone := strings.TrimSpace(phoneNumber)
-	key := strings.TrimSpace(idempotencyKey)
+	key := strings.ToLower(strings.TrimSpace(idempotencyKey))
 
-	if strings.HasSuffix(phone, "888") || strings.Contains(strings.ToLower(key), "decline") {
+	if strings.HasSuffix(phone, "888") || strings.Contains(key, "decline") {
 		return true, true
 	}
 
-	if strings.HasSuffix(phone, "999") || strings.Contains(strings.ToLower(key), "fail") {
+	if strings.HasSuffix(phone, "999") || strings.Contains(key, "fail") {
 		return true, false
 	}
 
@@ -644,11 +742,13 @@ func mustJSON(v any) string {
 
 func maskPhone(s string) string {
 	s = strings.TrimSpace(s)
+
 	if len(s) <= 4 {
 		return s
 	}
 	if len(s) <= 8 {
 		return s[:2] + strings.Repeat("*", len(s)-4) + s[len(s)-2:]
 	}
+
 	return s[:6] + strings.Repeat("*", len(s)-9) + s[len(s)-3:]
 }

@@ -4,33 +4,71 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/google/uuid"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/mading-alier/ppay-backend/internal/ledger"
 	"github.com/mading-alier/ppay-backend/internal/store"
 )
 
 type fakeTransactionStore struct {
-	createAirtimeTxFunc   func(ctx context.Context, req ledger.TransactionRequest, idempotencyKey, correlationID string) (*store.CreateTxResult, error)
-	reconcileTxFunc       func(ctx context.Context, ppayRef string, targetStatus string, reason string, correlationID string) (*store.ReconcileResult, error)
-	listTransactionEvents func(ctx context.Context, ppayRef string) (*store.ListEventsResult, error)
+	createAirtimeTxFunc       func(ctx context.Context, req ledger.TransactionRequest, idempotencyKey, correlationID string) (*store.CreateTxResult, error)
+	reconcileTxFunc           func(ctx context.Context, ppayRef string, targetStatus string, reason string, correlationID string) (*store.ReconcileResult, error)
+	listTransactionEventsFunc func(ctx context.Context, ppayRef string) (*store.ListEventsResult, error)
 }
 
-func (f *fakeTransactionStore) CreateAirtimeTx(ctx context.Context, req ledger.TransactionRequest, idempotencyKey, correlationID string) (*store.CreateTxResult, error) {
+func (f *fakeTransactionStore) CreateAirtimeTx(
+	ctx context.Context,
+	req ledger.TransactionRequest,
+	idempotencyKey,
+	correlationID string,
+) (*store.CreateTxResult, error) {
 	return f.createAirtimeTxFunc(ctx, req, idempotencyKey, correlationID)
 }
 
-func (f *fakeTransactionStore) ReconcileTransaction(ctx context.Context, ppayRef string, targetStatus string, reason string, correlationID string) (*store.ReconcileResult, error) {
+func (f *fakeTransactionStore) CreateDataBundleTx(
+	ctx context.Context,
+	req ledger.DataBundleTransaction,
+	idempotencyKey,
+	correlationID string,
+) (*store.CreateTxResult, error) {
+	_ = ctx
+	_ = req
+	_ = idempotencyKey
+	_ = correlationID
+
+	return nil, errors.New("CreateDataBundleTx not configured")
+}
+
+func (f *fakeTransactionStore) GetTransactionStatus(
+	ctx context.Context,
+	ppayRef string,
+) (*store.TransactionStatusResult, error) {
+	_ = ctx
+	_ = ppayRef
+
+	return nil, errors.New("GetTransactionStatus not configured")
+}
+func (f *fakeTransactionStore) ReconcileTransaction(
+	ctx context.Context,
+	ppayRef string,
+	targetStatus string,
+	reason string,
+	correlationID string,
+) (*store.ReconcileResult, error) {
 	return f.reconcileTxFunc(ctx, ppayRef, targetStatus, reason, correlationID)
 }
 
-func (f *fakeTransactionStore) ListTransactionEvents(ctx context.Context, ppayRef string) (*store.ListEventsResult, error) {
-	return f.listTransactionEvents(ctx, ppayRef)
+func (f *fakeTransactionStore) ListTransactionEvents(
+	ctx context.Context,
+	ppayRef string,
+) (*store.ListEventsResult, error) {
+	return f.listTransactionEventsFunc(ctx, ppayRef)
 }
 
 func TestNewErrorResponse(t *testing.T) {
@@ -80,6 +118,8 @@ func TestValidateAirtimeRequest(t *testing.T) {
 			req: ledger.TransactionRequest{
 				AmountMinor: 100,
 				Currency:    "SSP",
+				PhoneNumber: "+211912345678",
+				Network:     "MTN",
 			},
 			wantNil: true,
 		},
@@ -88,6 +128,8 @@ func TestValidateAirtimeRequest(t *testing.T) {
 			req: ledger.TransactionRequest{
 				AmountMinor: 50,
 				Currency:    "USD",
+				PhoneNumber: "+211912345678",
+				Network:     "ZAIN",
 			},
 			wantNil: true,
 		},
@@ -96,6 +138,8 @@ func TestValidateAirtimeRequest(t *testing.T) {
 			req: ledger.TransactionRequest{
 				AmountMinor: 0,
 				Currency:    "SSP",
+				PhoneNumber: "+211912345678",
+				Network:     "MTN",
 			},
 			wantCode:    "invalid_amount",
 			wantMessage: "amount must be greater than zero",
@@ -105,9 +149,31 @@ func TestValidateAirtimeRequest(t *testing.T) {
 			req: ledger.TransactionRequest{
 				AmountMinor: 100,
 				Currency:    "KES",
+				PhoneNumber: "+211912345678",
+				Network:     "MTN",
 			},
 			wantCode:    "invalid_currency",
-			wantMessage: "currency must be SSP or USD",
+			wantMessage: "currency must be SSP, USD, or EUR",
+		},
+		{
+			name: "missing phone number",
+			req: ledger.TransactionRequest{
+				AmountMinor: 100,
+				Currency:    "SSP",
+				Network:     "MTN",
+			},
+			wantCode:    "missing_phone_number",
+			wantMessage: "phone number is required",
+		},
+		{
+			name: "missing network",
+			req: ledger.TransactionRequest{
+				AmountMinor: 100,
+				Currency:    "SSP",
+				PhoneNumber: "+211912345678",
+			},
+			wantCode:    "missing_network",
+			wantMessage: "network is required",
 		},
 	}
 
@@ -219,7 +285,11 @@ func TestAirtimeHandler_InvalidJSON(t *testing.T) {
 func TestAirtimeHandler_InvalidAmount(t *testing.T) {
 	h := &Handler{}
 
-	req := httptest.NewRequest(http.MethodPost, "/tx/airtime", strings.NewReader(`{"amount":0,"currency":"SSP"}`))
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/tx/airtime",
+		strings.NewReader(`{"amount_minor":0,"currency":"SSP","phone_number":"+211912345678","network":"MTN"}`),
+	)
 	req.Header.Set("X-Idempotency-Key", "test-key")
 	w := httptest.NewRecorder()
 
@@ -246,7 +316,11 @@ func TestAirtimeHandler_InvalidAmount(t *testing.T) {
 func TestAirtimeHandler_InvalidCurrency(t *testing.T) {
 	h := &Handler{}
 
-	req := httptest.NewRequest(http.MethodPost, "/tx/airtime", strings.NewReader(`{"amount":100,"currency":"KES"}`))
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/tx/airtime",
+		strings.NewReader(`{"amount_minor":100,"currency":"KES","phone_number":"+211912345678","network":"MTN"}`),
+	)
 	req.Header.Set("X-Idempotency-Key", "test-key")
 	w := httptest.NewRecorder()
 
@@ -265,8 +339,8 @@ func TestAirtimeHandler_InvalidCurrency(t *testing.T) {
 		t.Fatalf("Code = %q, want %q", resp.Code, "invalid_currency")
 	}
 
-	if resp.Message != "currency must be SSP or USD" {
-		t.Fatalf("Message = %q, want %q", resp.Message, "currency must be SSP or USD")
+	if resp.Message != "currency must be SSP, USD, or EUR" {
+		t.Fatalf("Message = %q, want %q", resp.Message, "currency must be SSP, USD, or EUR")
 	}
 }
 
@@ -279,7 +353,11 @@ func TestAirtimeHandler_IdempotencyConflict(t *testing.T) {
 		},
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/tx/airtime", strings.NewReader(`{"amount":100,"currency":"SSP"}`))
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/tx/airtime",
+		strings.NewReader(`{"amount_minor":100,"currency":"SSP","phone_number":"+211912345678","network":"MTN"}`),
+	)
 	req.Header.Set("X-Idempotency-Key", "conflict-key")
 	w := httptest.NewRecorder()
 
@@ -312,7 +390,11 @@ func TestAirtimeHandler_CreateFailure(t *testing.T) {
 		},
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/tx/airtime", strings.NewReader(`{"amount":100,"currency":"SSP"}`))
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/tx/airtime",
+		strings.NewReader(`{"amount_minor":100,"currency":"SSP","phone_number":"+211912345678","network":"MTN"}`),
+	)
 	req.Header.Set("X-Idempotency-Key", "fail-key")
 	w := httptest.NewRecorder()
 
@@ -353,7 +435,11 @@ func TestAirtimeHandler_Success(t *testing.T) {
 		},
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/tx/airtime", strings.NewReader(`{"amount":100,"currency":"SSP"}`))
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/tx/airtime",
+		strings.NewReader(`{"amount_minor":100,"currency":"SSP","phone_number":"+211912345678","network":"MTN"}`),
+	)
 	req.Header.Set("X-Idempotency-Key", "ok-key")
 	w := httptest.NewRecorder()
 
@@ -403,7 +489,11 @@ func TestAirtimeHandler_Success(t *testing.T) {
 func TestTxReconcileHandler_MissingReference(t *testing.T) {
 	h := &Handler{}
 
-	req := httptest.NewRequest(http.MethodPost, "/tx//reconcile", strings.NewReader(`{"target_status":"SETTLED","reason":"manual fix"}`))
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/tx//reconcile",
+		strings.NewReader(`{"target_status":"SETTLED","reason":"manual fix"}`),
+	)
 	w := httptest.NewRecorder()
 
 	h.TxReconcileHandler(w, req)
@@ -425,7 +515,11 @@ func TestTxReconcileHandler_MissingReference(t *testing.T) {
 func TestTxReconcileHandler_InvalidJSON(t *testing.T) {
 	h := &Handler{}
 
-	req := httptest.NewRequest(http.MethodPost, "/tx/PPTX-20260521-000001/reconcile", strings.NewReader("{"))
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/tx/PPTX-20260521-000001/reconcile",
+		strings.NewReader("{"),
+	)
 	req.SetPathValue("ref", "11111111-1111-1111-1111-111111111111")
 	w := httptest.NewRecorder()
 
@@ -448,7 +542,11 @@ func TestTxReconcileHandler_InvalidJSON(t *testing.T) {
 func TestTxReconcileHandler_InvalidTargetStatus(t *testing.T) {
 	h := &Handler{}
 
-	req := httptest.NewRequest(http.MethodPost, "/tx/PPTX-20260521-000001/reconcile", strings.NewReader(`{"target_status":"PENDING","reason":"manual fix"}`))
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/tx/PPTX-20260521-000001/reconcile",
+		strings.NewReader(`{"target_status":"PENDING","reason":"manual fix"}`),
+	)
 	req.SetPathValue("ref", "11111111-1111-1111-1111-111111111111")
 	w := httptest.NewRecorder()
 
@@ -471,7 +569,11 @@ func TestTxReconcileHandler_InvalidTargetStatus(t *testing.T) {
 func TestTxReconcileHandler_MissingReason(t *testing.T) {
 	h := &Handler{}
 
-	req := httptest.NewRequest(http.MethodPost, "/tx/PPTX-20260521-000001/reconcile", strings.NewReader(`{"target_status":"SETTLED","reason":""}`))
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/tx/PPTX-20260521-000001/reconcile",
+		strings.NewReader(`{"target_status":"SETTLED","reason":""}`),
+	)
 	req.SetPathValue("ref", "11111111-1111-1111-1111-111111111111")
 	w := httptest.NewRecorder()
 
@@ -500,7 +602,11 @@ func TestTxReconcileHandler_TransactionNotFound(t *testing.T) {
 		},
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/tx/PPTX-20260521-000001/reconcile", strings.NewReader(`{"target_status":"SETTLED","reason":"manual fix"}`))
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/tx/PPTX-20260521-000001/reconcile",
+		strings.NewReader(`{"target_status":"SETTLED","reason":"manual fix"}`),
+	)
 	req.SetPathValue("ref", "11111111-1111-1111-1111-111111111111")
 	w := httptest.NewRecorder()
 
@@ -529,7 +635,11 @@ func TestTxReconcileHandler_ReconcileNotAllowed(t *testing.T) {
 		},
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/tx/PPTX-20260521-000001/reconcile", strings.NewReader(`{"target_status":"FAILED","reason":"manual fix"}`))
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/tx/PPTX-20260521-000001/reconcile",
+		strings.NewReader(`{"target_status":"FAILED","reason":"manual fix"}`),
+	)
 	req.SetPathValue("ref", "11111111-1111-1111-1111-111111111111")
 	w := httptest.NewRecorder()
 
@@ -558,7 +668,11 @@ func TestTxReconcileHandler_Failure(t *testing.T) {
 		},
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/tx/PPTX-20260521-000001/reconcile", strings.NewReader(`{"target_status":"REVERSED","reason":"manual fix"}`))
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/tx/PPTX-20260521-000001/reconcile",
+		strings.NewReader(`{"target_status":"REVERSED","reason":"manual fix"}`),
+	)
 	req.SetPathValue("ref", "11111111-1111-1111-1111-111111111111")
 	w := httptest.NewRecorder()
 
@@ -596,7 +710,11 @@ func TestTxReconcileHandler_Success(t *testing.T) {
 		},
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/tx/PPTX-20260521-000001/reconcile", strings.NewReader(`{"target_status":"SETTLED","reason":"manual fix"}`))
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/tx/PPTX-20260521-000001/reconcile",
+		strings.NewReader(`{"target_status":"SETTLED","reason":"manual fix"}`),
+	)
 	req.SetPathValue("ref", "11111111-1111-1111-1111-111111111111")
 	w := httptest.NewRecorder()
 
@@ -668,7 +786,7 @@ func TestTxEventsHandler_MissingReference(t *testing.T) {
 func TestTxEventsHandler_TransactionNotFound(t *testing.T) {
 	h := &Handler{
 		Store: &fakeTransactionStore{
-			listTransactionEvents: func(ctx context.Context, ppayRef string) (*store.ListEventsResult, error) {
+			listTransactionEventsFunc: func(ctx context.Context, ppayRef string) (*store.ListEventsResult, error) {
 				return nil, store.ErrTransactionNotFound
 			},
 		},
@@ -697,7 +815,7 @@ func TestTxEventsHandler_TransactionNotFound(t *testing.T) {
 func TestTxEventsHandler_Failure(t *testing.T) {
 	h := &Handler{
 		Store: &fakeTransactionStore{
-			listTransactionEvents: func(ctx context.Context, ppayRef string) (*store.ListEventsResult, error) {
+			listTransactionEventsFunc: func(ctx context.Context, ppayRef string) (*store.ListEventsResult, error) {
 				return nil, errors.New("db down")
 			},
 		},
@@ -729,7 +847,7 @@ func TestTxEventsHandler_Success(t *testing.T) {
 
 	h := &Handler{
 		Store: &fakeTransactionStore{
-			listTransactionEvents: func(ctx context.Context, ppayRef string) (*store.ListEventsResult, error) {
+			listTransactionEventsFunc: func(ctx context.Context, ppayRef string) (*store.ListEventsResult, error) {
 				return &store.ListEventsResult{
 					PpayRef: ppayRef,
 					Events: []store.TransactionEvent{

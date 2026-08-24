@@ -46,15 +46,19 @@ func (h *AirtimeHandler) CreateTopup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	defer r.Body.Close()
 
 	var req createTopupRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+
+	if err := dec.Decode(&req); err != nil {
 		http.Error(w, "invalid json body", http.StatusBadRequest)
 		return
 	}
 
-	idempotencyKey := r.Header.Get("Idempotency-Key")
-	correlationID := r.Header.Get("X-Correlation-ID")
+	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	correlationID := strings.TrimSpace(r.Header.Get("X-Correlation-ID"))
 
 	topup, err := h.service.CreateAndSubmitTopup(r.Context(), airtime.CreateTopupInput{
 		IdempotencyKey: idempotencyKey,
@@ -77,21 +81,11 @@ func (h *AirtimeHandler) CreateTopup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := topupResponse{
-		ID:             string(topup.ID),
-		CorrelationID:  string(topup.CorrelationID),
-		IdempotencyKey: string(topup.IdempotencyKey),
-		Status:         string(topup.Status),
-		Provider:       topup.Provider,
-		PhoneNumber:    topup.PhoneNumber,
-		Network:        topup.Network,
-		AmountMinor:    topup.AmountMinor,
-		Currency:       topup.Currency,
-		FailureReason:  topup.FailureReason,
-	}
+	resp := toTopupResponse(topup)
 
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
+	w.Header().Set("Location", "/v1/airtime/topups/"+resp.ID)
+	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
@@ -119,7 +113,14 @@ func (h *AirtimeHandler) GetTopup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := topupResponse{
+	resp := toTopupResponse(topup)
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func toTopupResponse(topup *airtime.AirtimeTopup) topupResponse {
+	return topupResponse{
 		ID:             string(topup.ID),
 		CorrelationID:  string(topup.CorrelationID),
 		IdempotencyKey: string(topup.IdempotencyKey),
@@ -131,7 +132,4 @@ func (h *AirtimeHandler) GetTopup(w http.ResponseWriter, r *http.Request) {
 		Currency:       topup.Currency,
 		FailureReason:  topup.FailureReason,
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
 }

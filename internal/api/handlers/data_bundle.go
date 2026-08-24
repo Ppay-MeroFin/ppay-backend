@@ -2,13 +2,14 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
+	"github.com/google/uuid"
+
 	"github.com/mading-alier/ppay-backend/internal/ledger"
 	"github.com/mading-alier/ppay-backend/internal/store"
-
-	"github.com/google/uuid"
 )
 
 type DataBundleHandler struct {
@@ -20,16 +21,16 @@ func NewDataBundleHandler(st *store.Store) *DataBundleHandler {
 }
 
 type createDataBundleRequest struct {
-	ProductType  string  `json:"product_type"`
-	PhoneNumber  string  `json:"phone_number"`
-	Network      string  `json:"network"`
-	BundleCode   string  `json:"bundle_code"`
-	BundleName   string  `json:"bundle_name,omitempty"`
-	BundleSizeMB int64   `json:"bundle_size_mb,omitempty"`
-	Amount       float64 `json:"amount"`
-	Currency     string  `json:"currency"`
-	FromAccount  string  `json:"from_account"`
-	ToAccount    string  `json:"to_account"`
+	ProductType  string `json:"product_type"`
+	PhoneNumber  string `json:"phone_number"`
+	Network      string `json:"network"`
+	BundleCode   string `json:"bundle_code"`
+	BundleName   string `json:"bundle_name,omitempty"`
+	BundleSizeMB int64  `json:"bundle_size_mb,omitempty"`
+	AmountMinor  int64  `json:"amount_minor"`
+	Currency     string `json:"currency"`
+	FromAccount  string `json:"from_account"`
+	ToAccount    string `json:"to_account"`
 }
 
 type createDataBundleResponse struct {
@@ -47,8 +48,18 @@ func (h *DataBundleHandler) CreateDataBundle(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	if h.store == nil {
+		http.Error(w, "store is not configured", http.StatusInternalServerError)
+		return
+	}
+
+	defer r.Body.Close()
+
 	var req createDataBundleRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+
+	if err := dec.Decode(&req); err != nil {
 		http.Error(w, "invalid json body", http.StatusBadRequest)
 		return
 	}
@@ -85,46 +96,52 @@ func (h *DataBundleHandler) CreateDataBundle(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if strings.TrimSpace(req.PhoneNumber) == "" {
+	phoneNumber := strings.TrimSpace(req.PhoneNumber)
+	network := strings.ToUpper(strings.TrimSpace(req.Network))
+	bundleCode := strings.TrimSpace(req.BundleCode)
+	bundleName := strings.TrimSpace(req.BundleName)
+	currency := strings.ToUpper(strings.TrimSpace(req.Currency))
+
+	if phoneNumber == "" {
 		http.Error(w, "phone_number is required", http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(req.Network) == "" {
+	if network == "" {
 		http.Error(w, "network is required", http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(req.BundleCode) == "" {
+	if bundleCode == "" {
 		http.Error(w, "bundle_code is required", http.StatusBadRequest)
 		return
 	}
-	if req.Amount <= 0 {
-		http.Error(w, "amount must be greater than zero", http.StatusBadRequest)
+	if req.AmountMinor <= 0 {
+		http.Error(w, "amount_minor must be greater than zero", http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(req.Currency) == "" {
+	if currency == "" {
 		http.Error(w, "currency is required", http.StatusBadRequest)
 		return
 	}
 
 	txReq, err := ledger.NewDataBundleTransaction(
-        strings.TrimSpace(req.PhoneNumber),
-        strings.ToUpper(strings.TrimSpace(req.Network)),
-        strings.TrimSpace(req.BundleCode),
-        strings.TrimSpace(req.BundleName),
-        req.BundleSizeMB,
-        int64(req.Amount),
-        strings.ToUpper(strings.TrimSpace(req.Currency)),
-        fromAccount,
-        toAccount,
-)
-if err != nil {
-        http.Error(w, err.Error(), http.StatusBadRequest)
-        return
-}
-
-result, err := h.store.CreateDataBundleTx(r.Context(), txReq, idempotencyKey, correlationID)
+		phoneNumber,
+		network,
+		bundleCode,
+		bundleName,
+		req.BundleSizeMB,
+		req.AmountMinor,
+		currency,
+		fromAccount,
+		toAccount,
+	)
 	if err != nil {
-		if err == store.ErrIdempotencyConflict {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	result, err := h.store.CreateDataBundleTx(r.Context(), txReq, idempotencyKey, correlationID)
+	if err != nil {
+		if errors.Is(err, store.ErrIdempotencyConflict) {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
@@ -145,5 +162,3 @@ result, err := h.store.CreateDataBundleTx(r.Context(), txReq, idempotencyKey, co
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(resp)
 }
-
-

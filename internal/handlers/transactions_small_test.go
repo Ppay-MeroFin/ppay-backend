@@ -12,7 +12,12 @@ import (
 func TestWriteJSONError(t *testing.T) {
 	rr := httptest.NewRecorder()
 
-	writeJSONError(rr, http.StatusBadRequest, "invalid_amount", "amount must be greater than zero")
+	writeJSONError(
+		rr,
+		http.StatusBadRequest,
+		"invalid_amount",
+		"amount must be greater than zero",
+	)
 
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
@@ -174,17 +179,23 @@ func TestSQLNullTimeScan(t *testing.T) {
 		}
 	})
 }
+
 func TestNewHandler(t *testing.T) {
-	h := NewHandler(nil)
+	h := NewHandler(nil, nil)
 
 	if h == nil {
-		t.Fatal("NewHandler(nil) returned nil")
+		t.Fatal("NewHandler(nil, nil) returned nil")
 	}
 
 	if h.Store != nil {
 		t.Fatalf("Store = %#v, want nil", h.Store)
 	}
+
+	if h.MTNClient != nil {
+		t.Fatalf("MTNClient = %#v, want nil", h.MTNClient)
+	}
 }
+
 func TestAirtimeHandlerValidationBranches(t *testing.T) {
 	h := &Handler{}
 
@@ -229,7 +240,11 @@ func TestAirtimeHandlerValidationBranches(t *testing.T) {
 	})
 
 	t.Run("invalid json", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/airtime", strings.NewReader("{"))
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/airtime",
+			strings.NewReader("{"),
+		)
 		req.Header.Set("X-Idempotency-Key", "idem-1")
 		rr := httptest.NewRecorder()
 
@@ -254,7 +269,12 @@ func TestAirtimeHandlerValidationBranches(t *testing.T) {
 			"amount": 0,
 			"currency": "SSP"
 		}`
-		req := httptest.NewRequest(http.MethodPost, "/airtime", strings.NewReader(body))
+
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/airtime",
+			strings.NewReader(body),
+		)
 		req.Header.Set("X-Idempotency-Key", "idem-2")
 		rr := httptest.NewRecorder()
 
@@ -276,10 +296,15 @@ func TestAirtimeHandlerValidationBranches(t *testing.T) {
 
 	t.Run("invalid currency", func(t *testing.T) {
 		body := `{
-			"amount": 100,
+			"amount_minor": 100,
 			"currency": "KES"
 		}`
-		req := httptest.NewRequest(http.MethodPost, "/airtime", strings.NewReader(body))
+
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/airtime",
+			strings.NewReader(body),
+		)
 		req.Header.Set("X-Idempotency-Key", "idem-3")
 		rr := httptest.NewRecorder()
 
