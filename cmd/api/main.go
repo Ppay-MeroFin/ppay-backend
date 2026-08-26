@@ -52,6 +52,8 @@ func main() {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", h.HealthHandler)
+	mux.HandleFunc("POST /v1/auth/pin", h.CreatePIN)
+	mux.HandleFunc("POST /v1/auth/pin/verify", h.VerifyPIN)
 	mux.HandleFunc("POST /tx/airtime", h.AirtimeHandler)
 	mux.HandleFunc("POST /tx/data-bundle", h.DataBundleHandler)
 	mux.HandleFunc("GET /tx/status/{ref}", h.TxStatusHandler)

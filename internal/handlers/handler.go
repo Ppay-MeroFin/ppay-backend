@@ -46,6 +46,7 @@ type TransactionStore interface {
 
 type Handler struct {
 	Store     TransactionStore
+	PINStore  PINStore
 	MTNClient *mtnmomo.CollectionClient
 }
 
@@ -54,13 +55,16 @@ func NewHandler(
 	mtnClient *mtnmomo.CollectionClient,
 ) *Handler {
 	var transactionStore TransactionStore
+	var pinStore PINStore
 
 	if st != nil {
 		transactionStore = st
+		pinStore = st
 	}
 
 	return &Handler{
 		Store:     transactionStore,
+		PINStore:  pinStore,
 		MTNClient: mtnClient,
 	}
 }
